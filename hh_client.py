@@ -62,6 +62,7 @@ class VacancyDetails:
     description: str = ""
     error: str = ""
     company_url: str = ""
+    salary_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -603,8 +604,16 @@ class HHClient:
                 summary.url,
                 await company_locator.get_attribute("href") if company else None,
             )
+            salary_text = ""
+            if self.settings.profile.hh.minimum_salary_rub:
+                try:
+                    salary = page.locator('[data-qa="vacancy-salary"]').first
+                    if await salary.is_visible():
+                        salary_text = (await salary.inner_text()).strip()
+                except Exception:
+                    logger.warning("vacancy_salary_unavailable job_id=%s", summary.id)
             return VacancyDetails(
-                summary, state, company, description, company_url=company_url
+                summary, state, company, description, company_url=company_url, salary_text=salary_text
             )
         except Exception as exc:
             return VacancyDetails(summary, PageState.NETWORK_ERROR, error=str(exc))

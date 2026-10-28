@@ -82,6 +82,15 @@ def test_load_settings_uses_safe_defaults(tmp_path: Path) -> None:
     assert settings.auto_apply.timezone == "UTC"
 
 
+@pytest.mark.parametrize("value", [-1, "80000", True])
+def test_salary_minimum_rejects_invalid_values(tmp_path, value):
+    import copy
+    profile = copy.deepcopy(VALID_PROFILE)
+    profile["hh"]["minimum_salary_rub"] = value
+    with pytest.raises(ConfigError, match="minimum_salary_rub"):
+        load_settings(profile_path=write_profile(tmp_path, profile), environ=VALID_ENV)
+
+
 def test_auto_apply_settings_require_live_approval_and_valid_window(
     tmp_path: Path,
 ) -> None:

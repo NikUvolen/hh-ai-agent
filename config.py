@@ -47,6 +47,7 @@ class HHProfile:
     areas: tuple[str, ...]
     experience_filters: tuple[str, ...]
     remote_only: bool = False
+    minimum_salary_rub: int = 0
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,7 @@ class Settings:
     circuit_breaker_unknown_ratio: float
     circuit_breaker_page_errors: int
     profile: Profile
+    search_discount_hours_only: bool = False
 
     @property
     def ollama_url(self) -> str:
@@ -387,6 +389,10 @@ def load_settings(
     if not isinstance(remote_only_value, bool):
         errors.append("hh.remote_only must be true or false")
         remote_only_value = False
+    minimum_salary_rub = hh_data.get("minimum_salary_rub", 0)
+    if isinstance(minimum_salary_rub, bool) or not isinstance(minimum_salary_rub, int) or minimum_salary_rub < 0:
+        errors.append("hh.minimum_salary_rub must be a non-negative integer")
+        minimum_salary_rub = 0
 
     try:
         candidate = CandidateProfile(
@@ -411,6 +417,7 @@ def load_settings(
             areas=_strings(hh_data, "areas"),
             experience_filters=_strings(hh_data, "experience_filters"),
             remote_only=remote_only_value,
+            minimum_salary_rub=minimum_salary_rub,
         )
         max_length_value = cover_data.get("max_length", 1800)
         if isinstance(max_length_value, bool) or not isinstance(max_length_value, int) or max_length_value <= 0:
@@ -491,6 +498,7 @@ def load_settings(
         database_path=_path(values.get("DATABASE_PATH", "agent.db")),
         log_path=_path(values.get("LOG_PATH", "agent.log")),
         check_interval_minutes=positive_integer("CHECK_INTERVAL_MINUTES", "30"),
+        search_discount_hours_only=boolean("SEARCH_DISCOUNT_HOURS_ONLY", "false"),
         max_applications_per_day=positive_integer("MAX_APPLICATIONS_PER_DAY", "5"),
         max_vacancies_per_query=positive_integer("MAX_VACANCIES_PER_QUERY", "20"),
         max_pages_per_query=positive_integer("MAX_PAGES_PER_QUERY", "2"),

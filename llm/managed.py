@@ -81,7 +81,11 @@ class ManagedLLMProvider:
                 raise LLMDailyLimitError()
             try:
                 response = await self.adapter.complete(active_request)
-                if not response.text.strip() or response.finish_reason == "length":
+                if response.finish_reason == "length":
+                    logger.warning("llm_invalid_response reason=output_truncated operation=%s max_output_tokens=%s output_tokens=%s", request.operation, request.max_output_tokens, response.output_tokens)
+                    raise LLMInvalidResponseError()
+                if not response.text.strip():
+                    logger.warning("llm_invalid_response reason=empty_content operation=%s", request.operation)
                     raise LLMInvalidResponseError()
                 parsed = None
                 if response_model is not None:
@@ -100,6 +104,8 @@ class ManagedLLMProvider:
                     try:
                         parsed = response_model.model_validate_json(raw_text)
                     except ValidationError as exc:
+                        error_types = sorted({error["type"] for error in exc.errors(include_input=False)})
+                        logger.warning("llm_invalid_response reason=schema_validation operation=%s validation_types=%s", request.operation, ",".join(error_types))
                         raise LLMInvalidResponseError() from exc
                 self.database.complete_llm_request(
                     row_id,

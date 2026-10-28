@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
 import os
 import platform
 import shutil
@@ -609,6 +610,18 @@ def step_profile_optional(current_profile: dict, required_data: dict) -> dict:
         "Исключённые должности (junior, intern, ...)",
         default=list(cand.get("excluded_positions", [])),
     )
+    excluded_companies = ask_list(
+        "Исключённые компании через запятую",
+        default=list(cand.get("excluded_companies", [])),
+    )
+    while True:
+        salary_minimum = ask(
+            "Минимальная зарплата в рублях за месяц (0 — выключено)",
+            default=str(hh.get("minimum_salary_rub", 0)),
+        )
+        if salary_minimum.isdecimal():
+            break
+        warn("Введите неотрицательное целое число")
 
     print(f"\n  {dim('Регионы HH.ru: 1=Москва, 2=Санкт-Петербург, 113=Россия. Пусто = все.')}")
     areas = ask_list("Регионы HH.ru через запятую (ID или пусто)", default=list(hh.get("areas", [])))
@@ -633,6 +646,9 @@ def step_profile_optional(current_profile: dict, required_data: dict) -> dict:
         "salary_expectation": salary,
         "work_format": work_format,
         "excluded_positions": excluded,
+        "excluded_companies": excluded_companies,
+        "excluded_keywords": list(cand.get("excluded_keywords", [])),
+        "minimum_salary_rub": int(salary_minimum),
         "areas": areas,
         "experience_filters": exp_filters,
         "additional_information": additional,
@@ -874,7 +890,7 @@ def _yaml_list(items: list[str]) -> str:
     строку начинающуюся с \n для блочного списка (чтобы использовать как key:{val})."""
     if not items:
         return " []"  # ведущий пробел: key: [] → валидный YAML
-    return "\n" + "\n".join(f'    - "{item}"' for item in items)
+    return "\n" + "\n".join(f"    - {json.dumps(item, ensure_ascii=False)}" for item in items)
 
 
 def build_profile(required: dict, optional: dict) -> str:
@@ -883,6 +899,8 @@ def build_profile(required: dict, optional: dict) -> str:
     technologies = _yaml_list(optional.get("technologies", []))
     work_format = _yaml_list(optional.get("work_format", []))
     excluded = _yaml_list(optional.get("excluded_positions", []))
+    excluded_companies = _yaml_list(optional.get("excluded_companies", []))
+    excluded_keywords = _yaml_list(optional.get("excluded_keywords", []))
     queries = _yaml_list(required.get("search_queries", []))
     areas = _yaml_list(optional.get("areas", []))
     exp_filters = _yaml_list(optional.get("experience_filters", []))
@@ -903,6 +921,8 @@ def build_profile(required: dict, optional: dict) -> str:
         f"  salary_expectation: {_yaml_str(optional.get('salary_expectation', ''))}",
         f"  work_format:{work_format}",
         f"  excluded_positions:{excluded}",
+        f"  excluded_companies:{excluded_companies}",
+        f"  excluded_keywords:{excluded_keywords}",
         f"  additional_information: {_yaml_str(optional.get('additional_information', ''))}",
         "",
         "hh:",
@@ -910,6 +930,7 @@ def build_profile(required: dict, optional: dict) -> str:
         f"  search_queries:{queries}",
         f"  areas:{areas}",
         f"  experience_filters:{exp_filters}",
+        f"  minimum_salary_rub: {optional.get('minimum_salary_rub', 0)}",
         "",
         "cover_letter:",
         f"  language: {_yaml_str(optional.get('cover_language', 'ru'))}",
@@ -1265,6 +1286,9 @@ def wizard_edit(existing_env: dict[str, str], existing_profile: dict) -> None:
                     "salary_expectation": existing_profile.get("candidate", {}).get("salary_expectation", ""),
                     "work_format": list(existing_profile.get("candidate", {}).get("work_format", [])),
                     "excluded_positions": list(existing_profile.get("candidate", {}).get("excluded_positions", [])),
+                    "excluded_companies": list(existing_profile.get("candidate", {}).get("excluded_companies", [])),
+                    "excluded_keywords": list(existing_profile.get("candidate", {}).get("excluded_keywords", [])),
+                    "minimum_salary_rub": existing_profile.get("hh", {}).get("minimum_salary_rub", 0),
                     "areas": list(existing_profile.get("hh", {}).get("areas", [])),
                     "experience_filters": list(existing_profile.get("hh", {}).get("experience_filters", [])),
                     "additional_information": existing_profile.get("candidate", {}).get("additional_information", ""),

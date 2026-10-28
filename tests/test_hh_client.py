@@ -585,6 +585,24 @@ def test_read_vacancy_collects_safe_company_url(tmp_path: Path) -> None:
     assert result.company_url == "https://hh.ru/employer/123"
 
 
+def test_read_vacancy_collects_salary_when_filter_enabled(tmp_path: Path) -> None:
+    settings = load_settings(profile_path=write_profile(tmp_path), environ=VALID_ENV)
+    settings = replace(settings, database_path=tmp_path / "agent.db", min_seconds_between_actions=0,
+                       profile=replace(settings.profile, hh=replace(settings.profile.hh, minimum_salary_rub=80000)))
+    database = Database(settings.database_path)
+    database.init()
+
+    class SalaryPage(VacancyPage):
+        def locator(self, selector):
+            if selector == '[data-qa="vacancy-salary"]':
+                return TextLocator("до 70 000 ₽ за месяц")
+            return super().locator(selector)
+
+    client = HHClient(FakeContext(SalaryPage()), settings, database, ApprovalGuard(settings, database), sleep=lambda _: asyncio.sleep(0))
+    result = asyncio.run(client.read_vacancy(VacancySummary("job-1", "Developer", "https://hh.ru/vacancy/1", "Python")))
+    assert result.salary_text == "до 70 000 ₽ за месяц"
+
+
 def test_read_company_details_parses_rating_and_review_count(tmp_path: Path) -> None:
     settings = replace(
         load_settings(profile_path=write_profile(tmp_path), environ=VALID_ENV),

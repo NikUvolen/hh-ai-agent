@@ -40,9 +40,91 @@ from tg_bot import AgentControl
 
 
 NOW = datetime(2026, 7, 26, 9, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(("hour", "allowed"), [(18, False), (19, True), (23, True), (3, True), (4, False)])
+def test_search_discount_window(hour, allowed):
+    moment = datetime(2026, 7, 26, hour, tzinfo=UTC)
+    assert main_module.search_window_open(moment) is allowed
+
+
+def test_search_cycle_does_not_search_outside_discount_window(tmp_path):
+    app_settings = replace(settings(tmp_path, "dry_run"), search_discount_hours_only=True)
+    database = Database(app_settings.database_path)
+    database.init()
+    hh = FakeHHClient(VacancyDetails(SUMMARY, PageState.VACANCY_LOADED, "Example", "Python"))
+    asyncio.run(run_search_cycle(app_settings, database, hh, FakeAnalyzer(), FakeTelegram(), AgentControl(), now_factory=lambda: NOW))
+    assert hh.search_calls == 0
+    assert hh.read_calls == 0
 SUMMARY = VacancySummary(
     "job-1", "Python developer", "https://example.com/vacancy/job-1", "Python"
 )
+
+
+def test_exhausted_llm_quota_stops_search_without_failing_vacancies(tmp_path):
+    app_settings = settings(tmp_path, "dry_run")
+    app_settings = replace(app_settings, llm=replace(app_settings.llm, max_requests_per_day=1))
+    database = Database(app_settings.database_path)
+    database.init()
+    database.reserve_llm_request(provider="fake", model="test", operation="test", now=NOW, daily_limit=1)
+    details = VacancyDetails(SUMMARY, PageState.VACANCY_LOADED, "Example", "Python")
+    hh = FakeHHClient(details)
+    telegram = FakeTelegram()
+    run = asyncio.run(run_search_cycle(app_settings, database, hh, FakeAnalyzer(), telegram, AgentControl(), now_factory=lambda: NOW))
+    assert hh.search_calls == 0
+    assert hh.read_calls == 0
+    assert database.get(SUMMARY.id) is None
+    assert len(telegram.notifications) == 1
+    assert "лимит" in telegram.notifications[0].lower()
+
+
+def test_quota_reached_during_analysis_keeps_vacancy_for_retry(tmp_path):
+    app_settings = settings(tmp_path, "dry_run")
+    app_settings = replace(app_settings, llm=replace(app_settings.llm, max_requests_per_day=1))
+    database = Database(app_settings.database_path)
+    database.init()
+
+    class LastRequestAnalyzer(FakeAnalyzer):
+        async def assess(self, title, description):
+            database.reserve_llm_request(provider="fake", model="test", operation="test", now=NOW, daily_limit=1)
+            return await super().assess(title, description)
+
+    details = VacancyDetails(SUMMARY, PageState.VACANCY_LOADED, "Example", "Python")
+    hh = FakeHHClient(details, [VacancySearchResult([SUMMARY], 1, 0)])
+    telegram = FakeTelegram()
+    asyncio.run(run_search_cycle(app_settings, database, hh, LastRequestAnalyzer(), telegram, AgentControl(), now_factory=lambda: NOW))
+    vacancy = database.get(SUMMARY.id)
+    assert vacancy.status == VacancyStatus.DISCOVERED
+    assert vacancy.analysis_retry_count == 0
+    assert len(telegram.notifications) == 1
+    assert "лимит" in telegram.notifications[0].lower()
+
+
+def test_low_salary_is_filtered_before_ai(tmp_path):
+    app_settings = settings(tmp_path, "dry_run")
+    app_settings = replace(app_settings, profile=replace(app_settings.profile, hh=replace(app_settings.profile.hh, minimum_salary_rub=80000)))
+    database = Database(app_settings.database_path)
+    database.init()
+    details = VacancyDetails(SUMMARY, PageState.VACANCY_LOADED, "Example", "Python", salary_text="до 70 000 ₽ за месяц")
+    analyzer = FakeAnalyzer()
+    result = asyncio.run(process_vacancy(SUMMARY, app_settings, database, FakeHHClient(details), analyzer, FakeTelegram(), now_factory=lambda: NOW))
+    assert result.outcome == "rejected_by_filter"
+    assert analyzer.assess_calls == 0
+    assert database.get(SUMMARY.id).status == VacancyStatus.REJECTED_BY_FILTER
+
+
+def test_excluded_company_is_filtered_before_ai(tmp_path):
+    app_settings = settings(tmp_path, "dry_run")
+    candidate = replace(app_settings.profile.candidate, excluded_companies=("Acme",))
+    app_settings = replace(app_settings, profile=replace(app_settings.profile, candidate=candidate))
+    database = Database(app_settings.database_path)
+    database.init()
+    details = VacancyDetails(SUMMARY, PageState.VACANCY_LOADED, "ACME Ltd", "Python")
+    analyzer = FakeAnalyzer()
+    result = asyncio.run(process_vacancy(SUMMARY, app_settings, database, FakeHHClient(details), analyzer, FakeTelegram(), now_factory=lambda: NOW))
+    assert result.outcome == "rejected_by_filter"
+    assert analyzer.assess_calls == 0
+    assert database.get(SUMMARY.id).llm_reason == "Excluded by profile filter: company:Acme"
 
 
 class FakeHHClient:

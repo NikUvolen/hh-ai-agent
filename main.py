@@ -29,7 +29,7 @@ from llm.mistral_keys import MistralKeyCipher, MistralKeyManager
 from llm.types import LLMRequest
 from logging_setup import configure_logging
 from tg_bot import AgentControl, TelegramService
-from vacancy_filter import vacancy_rejection_reason
+from vacancy_filter import salary_rejection_reason, vacancy_rejection_reason
 from version import __version__
 from mascots import (
     enable_pesec_mode,
@@ -41,6 +41,19 @@ from mascots import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def search_window_open(now: datetime) -> bool:
+    hour = now.astimezone(ZoneInfo("Europe/Moscow")).hour
+    return hour >= 22 or hour < 7
+
+
+def next_search_window(now: datetime) -> datetime:
+    local = now.astimezone(ZoneInfo("Europe/Moscow"))
+    start = local.replace(hour=22, minute=0, second=0, microsecond=0)
+    if start <= local:
+        start += timedelta(days=1)
+    return start
 ANALYSIS_MAX_ATTEMPTS = 3
 
 
@@ -261,6 +274,7 @@ async def process_vacancy(
         excluded_companies=settings.profile.candidate.excluded_companies,
         excluded_keywords=settings.profile.candidate.excluded_keywords,
     )
+    rejection = rejection or salary_rejection_reason(details.salary_text, settings.profile.hh.minimum_salary_rub)
     if rejection:
         database.transition(
             summary.id,
@@ -273,9 +287,13 @@ async def process_vacancy(
             "rejected_by_filter", rejection, PageState.VACANCY_LOADED
         )
 
+    if settings.search_discount_hours_only and not search_window_open(clock()):
+        return VacancyProcessResult("other_error", "search_window_closed")
     try:
         suitability = await analyzer.assess(summary.title, details.description)
     except AnalysisError as exc:
+        if exc.error_type == "daily_limit":
+            return VacancyProcessResult("other_error", "llm_daily_limit")
         database.mark_analysis_failed(
             summary.id,
             error_type=exc.error_type,
@@ -310,14 +328,23 @@ async def process_vacancy(
     pesec_on_approve(summary.title, score=suitability.confidence)
 
     fit_summary = normalize_fit_summary(suitability.fit_points)
+    if settings.search_discount_hours_only and not search_window_open(clock()):
+        return VacancyProcessResult("other_error", "search_window_closed")
+    if database.llm_requests_today(clock().astimezone()) >= settings.llm.max_requests_per_day:
+        return VacancyProcessResult("other_error", "llm_daily_limit")
     company = await hh_client.read_company_details(details.company_url)
     database.store_company_details(
         summary.id, rating=company.rating, reviews_count=company.reviews_count
     )
 
-    letter = await analyzer.generate_cover_letter(
-        summary.title, details.description, company_name=details.company
-    )
+    try:
+        letter = await analyzer.generate_cover_letter(
+            summary.title, details.description, company_name=details.company
+        )
+    except AnalysisError as exc:
+        if exc.error_type == "daily_limit":
+            return VacancyProcessResult("other_error", "llm_daily_limit")
+        raise
     if not letter.strip():
         database.transition(
             summary.id,
@@ -412,13 +439,14 @@ async def run_search_cycle(
     handled_ids: set[str] = set()
     state = "completed"
     circuit_reason = ""
+    quota_exhausted = False
     failure: Exception | None = None
     logger.info(
         "search_cycle_started queries=%s", len(settings.profile.hh.search_queries)
     )
 
     async def process(summary: VacancySummary) -> None:
-        nonlocal circuit_reason, state
+        nonlocal circuit_reason, state, quota_exhausted
         if summary.id in handled_ids:
             return
         handled_ids.add(summary.id)
@@ -433,6 +461,9 @@ async def run_search_cycle(
             now_factory=now,
         )
         stats.record(result)
+        if result.reason == "llm_daily_limit":
+            quota_exhausted = True
+            return
         if result.reason == "auto_apply_failed":
             failed_application = database.get(summary.id)
             if (
@@ -452,11 +483,12 @@ async def run_search_cycle(
 
     try:
         database.expire_approved(now())
+        quota_exhausted = database.llm_requests_today(now().astimezone()) >= settings.llm.max_requests_per_day
         database.requeue_due_analysis_failures(
             now(), max_attempts=ANALYSIS_MAX_ATTEMPTS
         )
         for vacancy in database.unprocessed_discovered():
-            if control.paused or (
+            if control.paused or quota_exhausted or (settings.search_discount_hours_only and not search_window_open(now())) or (
                 auto_apply_batch_limit is not None
                 and stats.auto_applications >= auto_apply_batch_limit
             ):
@@ -470,10 +502,12 @@ async def run_search_cycle(
                 )
             )
         for query in settings.profile.hh.search_queries:
-            if control.paused or (
+            if control.paused or quota_exhausted or (settings.search_discount_hours_only and not search_window_open(now())) or database.llm_requests_today(now().astimezone()) >= settings.llm.max_requests_per_day or (
                 auto_apply_batch_limit is not None
                 and stats.auto_applications >= auto_apply_batch_limit
             ):
+                if not control.paused and database.llm_requests_today(now().astimezone()) >= settings.llm.max_requests_per_day:
+                    quota_exhausted = True
                 break
             logger.info("search_query_started query=%r", query)
             search = await hh_client.search_vacancies(
@@ -509,10 +543,12 @@ async def run_search_cycle(
                 control.paused = True
                 control.circuit_reason = circuit_reason
             for summary in search.summaries:
-                if control.paused or (
+                if control.paused or quota_exhausted or (settings.search_discount_hours_only and not search_window_open(now())) or database.llm_requests_today(now().astimezone()) >= settings.llm.max_requests_per_day or (
                     auto_apply_batch_limit is not None
                     and stats.auto_applications >= auto_apply_batch_limit
                 ):
+                    if not control.paused and database.llm_requests_today(now().astimezone()) >= settings.llm.max_requests_per_day:
+                        quota_exhausted = True
                     break
                 await process(summary)
         if not control.paused:
@@ -522,7 +558,10 @@ async def run_search_cycle(
         stats.record_error(type(exc).__name__)
         failure = exc
 
-    if circuit_reason:
+    quota_exhausted = quota_exhausted or database.llm_requests_today(now().astimezone()) >= settings.llm.max_requests_per_day
+    if quota_exhausted:
+        notification = "Дневной лимит AI-запросов исчерпан. Поиск возобновится после его обновления."
+    elif circuit_reason:
         notification = (
             f"Поиск приостановлен: {circuit_reason}. "
             "Проверьте /diagnostics и выполните /resume после устранения причины."
@@ -629,10 +668,22 @@ async def agent_loop(
 ) -> None:
     clock = now_factory or (lambda: datetime.now(UTC))
     next_auto_batch: datetime | None = None
+    notified_quota_day = None
     while True:
         wake_timeout_seconds = settings.check_interval_minutes * 60
         if control.paused:
             control.next_run_at = None
+        elif settings.search_discount_hours_only and not search_window_open(clock()):
+            control.next_run_at = next_search_window(clock())
+            wake_timeout_seconds = max(0.0, (control.next_run_at - clock()).total_seconds())
+        elif database.llm_requests_today(clock().astimezone()) >= settings.llm.max_requests_per_day:
+            local_now = clock().astimezone()
+            if notified_quota_day != local_now.date():
+                await telegram.notify("Дневной лимит AI-запросов исчерпан. Поиск возобновится после его обновления.")
+                notified_quota_day = local_now.date()
+            midnight = (local_now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            control.next_run_at = midnight
+            wake_timeout_seconds = max(0.0, (midnight - local_now).total_seconds())
         elif settings.auto_apply.enabled:
             now = clock()
             next_auto_batch = next_auto_batch or restored_auto_batch_at(
@@ -715,6 +766,12 @@ async def agent_loop(
                 + timedelta(minutes=settings.check_interval_minutes)
             )
             wake_timeout_seconds = settings.check_interval_minutes * 60
+        if not control.paused and database.llm_requests_today(clock().astimezone()) >= settings.llm.max_requests_per_day:
+            local_now = clock().astimezone()
+            notified_quota_day = local_now.date()
+            midnight = (local_now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            control.next_run_at = midnight
+            wake_timeout_seconds = max(0.0, (midnight - local_now).total_seconds())
         wake_received = False
         try:
             await asyncio.wait_for(

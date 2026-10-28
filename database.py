@@ -11,6 +11,16 @@ from pathlib import Path
 from typing import Iterable
 
 
+class ClosingConnection(sqlite3.Connection):
+    """Finish the transaction and release the file descriptor on context exit."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class VacancyStatus(str, Enum):
     DISCOVERED = "discovered"
     REJECTED_BY_FILTER = "rejected_by_filter"
@@ -134,7 +144,7 @@ class Database:
         self.path = Path(path)
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=10)
+        connection = sqlite3.connect(self.path, timeout=10, factory=ClosingConnection)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection

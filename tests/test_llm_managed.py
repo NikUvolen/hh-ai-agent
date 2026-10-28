@@ -277,6 +277,22 @@ def test_blank_text_is_invalid_and_gets_one_correction(tmp_path: Path) -> None:
     assert database.llm_usage_stats()["successful_requests"] == 1
 
 
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        (replace(response("secret"), finish_reason="length"), "output_truncated"),
+        (response("  "), "empty_content"),
+        (response('{"suitable":"secret","confidence":0.5}'), "schema_validation"),
+    ],
+)
+def test_invalid_response_logs_safe_diagnostic(tmp_path, caplog, value, reason):
+    provider, _, _ = managed(tmp_path, [value], max_retries=0)
+    with caplog.at_level("WARNING"), pytest.raises(LLMInvalidResponseError):
+        asyncio.run(provider.generate_structured(request(structured=True), StructuredAnswer))
+    assert f"reason={reason}" in caplog.text
+    assert "secret" not in caplog.text
+
+
 def test_logs_and_database_contain_metadata_but_not_content_or_secrets(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

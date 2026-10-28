@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from typing import Any
 
@@ -16,6 +17,7 @@ from llm.errors import (
 )
 from llm.types import LLMRequest, LLMResponse
 
+logger = logging.getLogger(__name__)
 
 class OpenAICompatibleProvider:
     name = "openai_compatible"
@@ -79,6 +81,7 @@ class OpenAICompatibleProvider:
                 try:
                     data = await response.json()
                 except (TypeError, ValueError) as exc:
+                    logger.warning("llm_invalid_response reason=invalid_api_json operation=%s", request.operation)
                     raise LLMInvalidResponseError() from exc
         except LLMError:
             raise
@@ -90,8 +93,10 @@ class OpenAICompatibleProvider:
             choice = data["choices"][0]
             text = choice["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
+            logger.warning("llm_invalid_response reason=invalid_api_envelope operation=%s", request.operation)
             raise LLMInvalidResponseError() from exc
         if not isinstance(text, str):
+            logger.warning("llm_invalid_response reason=non_string_content operation=%s", request.operation)
             raise LLMInvalidResponseError()
         usage = data.get("usage", {}) if isinstance(data, dict) else {}
         return LLMResponse(

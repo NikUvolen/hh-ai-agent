@@ -101,6 +101,19 @@ def test_build_profile_generates_valid_yaml(tmp_path) -> None:
     assert settings.profile.hh.search_queries == ("Python", "Django")
 
 
+def test_build_profile_keeps_company_and_keyword_exclusions_and_minimum_salary():
+    import yaml
+    rendered = setup_wizard.build_profile({}, {
+        "excluded_companies": ["Example"],
+        "excluded_keywords": ["spam"],
+        "minimum_salary_rub": 80000,
+    })
+    profile = yaml.safe_load(rendered)
+    assert profile["candidate"]["excluded_companies"] == ["Example"]
+    assert profile["candidate"]["excluded_keywords"] == ["spam"]
+    assert profile["hh"]["minimum_salary_rub"] == 80000
+
+
 def test_step_app_mode_auto(monkeypatch) -> None:
     monkeypatch.setattr(setup_wizard, "ask_choice", lambda *_args, **_kwargs: 3)
     monkeypatch.setattr(setup_wizard, "ask_yes_no", lambda *_args, **_kwargs: True)

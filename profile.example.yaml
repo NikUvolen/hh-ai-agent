@@ -21,6 +21,8 @@ hh:
   search_queries: []
   areas: []
   experience_filters: []
+  # 0 disables salary filtering; only clear monthly RUB upper bounds are compared.
+  minimum_salary_rub: 0
   # Restrict HH search to vacancies marked as remote work.
   remote_only: false
 

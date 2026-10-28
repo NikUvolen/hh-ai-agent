@@ -1,4 +1,5 @@
 import sqlite3
+import pytest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -7,6 +8,21 @@ from database import Database, VacancyStatus
 
 
 NOW = datetime(2026, 7, 26, 9, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_database_connection_closes_after_transaction(tmp_path, fail):
+    database = make_database(tmp_path)
+    connection = database._connect()
+    try:
+        with connection:
+            connection.execute("SELECT 1")
+            if fail:
+                raise ValueError("rollback")
+    except ValueError:
+        assert fail
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connection.execute("SELECT 1")
 
 
 def make_database(tmp_path: Path) -> Database:
